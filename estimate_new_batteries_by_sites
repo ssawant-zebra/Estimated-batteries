@@ -1,0 +1,448 @@
+create or replace TEMP table `battery_data` as (SELECT
+    _e AS serialnumber,CONCAT(battery_partnumber, battery_manufacturing_date, battery_serial_number) AS bid,
+    extract(date from TIMESTAMP_MILLIS(_r)) AS device_date,
+    extract(hour from TIMESTAMP_MILLIS(_r)) as device_hour,
+    extract(minute from TIMESTAMP_MILLIS(_r)) as device_min,
+    battery_level,ac_line_status,
+    COUNT(DISTINCT(_e)) OVER(PARTITION BY EXTRACT(date FROM TIMESTAMP_MILLIS(_r))) AS total_sn_cnt,
+    last_value(battery_level) over (partition by _e,extract(date from TIMESTAMP_MILLIS(_r)),extract(hour from TIMESTAMP_MILLIS(_r))  
+    order by extract(minute from TIMESTAMP_MILLIS(_r)) ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as last_battery_val
+  FROM
+    `es-s2dl-core-p.emc_eu.t_zagent_battery`
+  WHERE
+    DATE(_et) between"2024-06-01" and "2024-06-30"
+    AND DATE(TIMESTAMP_MILLIS(_r))  between "2024-06-01" and "2024-06-30"
+   
+    AND CONCAT(battery_partnumber, battery_manufacturing_date, battery_serial_number) != "UnknownUnknownUnknown"
+  --ORDER BY serialnumber,device_date, device_hour ASC
+  );
+
+create or replace TEMP table `battery_data_summ` as (SELECT
+distinct serialnumber,bid,device_date
+from battery_data
+where bid != "unknownunknownunknown"
+---order by serialnumber,bid,device_date 
+);
+
+
+create or replace TEMP table site_data as ( select  distinct serial_number,master_id,slot_date,site_name,from
+(Select serial_number, master_id,slot_date,site_name,
+ROW_NUMBER() OVER(PARTITION BY serial_number, slot_date ORDER BY site_name) AS first_created
+from `viq-st-eu-p.viq_operation.t_device_store_carry_forward_history`
+ where slot_date   between "2024-06-01" and "2024-06-30" and master_id=96487 
+ )where first_created = 1);
+
+ create or replace TEMP table `comb_site` as (
+  select a.*,b.site_name,b.master_id
+  from battery_data_summ as a inner join site_data as b
+  on a.serialnumber = b.serial_number and a.device_date=b.slot_date
+ );
+
+
+create or replace TEMP table `tot_dev_batt_summ` as (SELECT
+site_name,count(distinct serialnumber) as total_devices,count(distinct bid) as total_bid,
+from comb_site
+group by site_name
+--order by site_name
+ );
+
+-- create or replace TEMP table `batt_discharge_rate` as (
+-- select * from 
+-- `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_discharge_rate` 
+-- order by serialnumber );
+
+create or replace TEMP table `battery_data_summ1` as (SELECT
+distinct serialnumber,bid,device_date
+from battery_data
+where device_hour between 10 and 14
+and  ac_line_status = 0
+and bid != "unknownunknownunknown"
+--order by serialnumber,bid,device_date
+ );
+
+create or replace  table `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun_2024` as (
+Select serialnumber,bid,device_date,device_hour,last_battery_val_adj,total_sn_cnt,age_bid_years,last_battery_temp_val,
+last_battery_val_adj - (LAG(last_battery_val_adj)  over (order by serialnumber,bid,device_date,device_hour) ) as diff_prev_dayhour
+from(
+Select serialnumber,bid,device_date,device_hour,total_sn_cnt,curr_date,battery_manufacturing_date
+    ,round(date_diff(curr_date,battery_manufacturing_date,day)/365,2) as age_bid_years,last_battery_temp_val,
+     CASE
+      WHEN (last_battery_val > 100 )  THEN 100
+    ELSE
+     last_battery_val
+    END AS last_battery_val_adj
+   from(
+SELECT
+    _e AS serialnumber,CONCAT(battery_partnumber, battery_manufacturing_date, battery_serial_number) AS bid,
+    extract(date from TIMESTAMP_MILLIS(_r)) AS device_date,
+    extract(hour from TIMESTAMP_MILLIS(_r)) as device_hour,
+    extract(minute from TIMESTAMP_MILLIS(_r)) as device_min,
+    battery_level,ac_line_status,
+    safe_CAST(battery_manufacturing_date AS DATE)  as battery_manufacturing_date,
+    safe_CAST("2024-06-30" AS DATE) as curr_date,
+    COUNT(DISTINCT(_e)) OVER(PARTITION BY EXTRACT(date FROM TIMESTAMP_MILLIS(_r))) AS total_sn_cnt,
+    last_value(battery_level) over (partition by _e,extract(date from TIMESTAMP_MILLIS(_r)),extract(hour from TIMESTAMP_MILLIS(_r))  
+    order by extract(minute from TIMESTAMP_MILLIS(_r)) ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as last_battery_val,
+    (battery_temperature/10) as battery_temperature,
+    max((battery_temperature/10)) over (partition by _e,extract(date from TIMESTAMP_MILLIS(_r)),extract(hour from TIMESTAMP_MILLIS (_r))  order by extract(minute from TIMESTAMP_MILLIS(_r)) ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as last_battery_temp_val  
+   
+  FROM
+    `es-s2dl-core-p.emc_eu.t_zagent_battery`
+  WHERE
+    DATE(_et) between "2024-06-01" and "2024-06-30"
+    AND DATE(TIMESTAMP_MILLIS(_r))   between "2024-06-01" and "2024-06-30"
+    -- and _e in ("21217522506340","21241522503081","21206522509643")
+    AND CONCAT(battery_partnumber, battery_manufacturing_date, battery_serial_number) != "UnknownUnknownUnknown"
+  ORDER BY serialnumber,device_date, device_hour ASC)  
+  group by serialnumber,bid,device_date,device_hour,last_battery_val_adj,total_sn_cnt,curr_date,battery_manufacturing_date,last_battery_temp_val
+  --order by serialnumber,bid,device_date,device_hour
+  ) );
+ 
+ create or replace  table `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024` as (
+Select  * from dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun_2024
+ where device_hour between 7 and 15 and diff_prev_dayhour < 0
+ --order by  serialnumber,bid,device_date,device_hour
+ );
+ 
+ 
+create or replace TEMP table temp1 as (
+Select  * from dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024
+ where device_hour between 7 and 15 and diff_prev_dayhour < 0
+ --order by  serialnumber,bid,device_date,device_hour
+ );
+ 
+ create or replace TEMP table temp2 as (
+ select * ,  LAG(last_battery_val_adj) over (partition by serialnumber,bid,device_date order by device_hour) as prev_val
+from temp1
+--order by serialnumber,bid,device_date,device_hour
+);
+ 
+create or replace TEMP table temp3 as (
+ select * ,
+ case when last_battery_val_adj <= prev_val
+    then 'DECREASING'
+  when last_battery_val_adj > prev_val
+   then 'INCREASING'
+ else 'No Change' end CORRECT_ORDER
+from temp2
+--order by serialnumber,bid,device_date,device_hour
+);
+--Remove data where the bid reentered after the charging in the morning shift
+create or replace TEMP table temp4 as (
+ select * ,  min(device_hour) over (partition by serialnumber,bid,device_date order by device_hour) as first_incr_hour
+from temp3
+where CORRECT_ORDER = "INCREASING"
+--order by serialnumber,bid,device_date,device_hour
+);
+ 
+create or replace  table `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024`  as ( select * from (
+ select a.* , COALESCE(first_incr_hour, 25) as first_incr_hour
+from temp3 as a left join temp4 as b
+on a. serialnumber = b.serialnumber and a.bid=b.bid and a.device_date=b.device_date
+--order by serialnumber,bid,device_date,device_hour) where device_hour< first_incr_hour
+));
+-------------------------------------------------------------------------------
+create or replace TEMP table `check1` as ( select *, (last_battery_val_adj-diff_prev_dayhour)  as battery_shift_start_lvl from 
+(Select  *,
+ROW_NUMBER() OVER(PARTITION BY serialnumber,bid,device_date ORDER BY device_hour) AS first_created
+FROM `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024`)
+ where first_created = 1
+ --order by serialnumber,bid,device_date,device_hour
+ );
+
+--   create or replace TEMP table `check1` as (
+--   select a.*,b.rul_days
+--   from check1 as a left join  `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.rul_prediction_ss` as b
+--   on a.bid = b.bid_new and a.device_date=b.prediction_date
+--  );
+
+ create or replace TEMP table `check2` as 
+(Select  serialnumber,bid,device_date ,avg(diff_prev_dayhour) as avg_hourly_battery_discharge_rate
+FROM `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024`
+group by serialnumber,bid,device_date
+ --order by serialnumber,bid,device_date
+ );
+
+create or replace TEMP table `check3` as  ( select  serialnumber,bid,device_date,device_hour as shift_last_recorded_hour,
+ last_battery_val_adj as battery_shift_last_lvl from (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY serialnumber,bid,device_date ORDER BY device_hour DESC) AS rn
+  FROM `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.battery_morning_shift_jun2024`)
+  where rn = 1
+ ---order by serialnumber,bid,device_date,device_hour
+ );
+
+create or replace TEMP table `comb_bid_data` as (
+  select a.serialnumber,a.bid,a.device_date,(a.device_hour-1) as shift_first_recorded_hour,a.battery_shift_start_lvl,
+  b.avg_hourly_battery_discharge_rate,c.shift_last_recorded_hour,c.battery_shift_last_lvl
+  from check1 as a inner join check2 as b
+  on a.serialnumber = b.serialnumber and a.bid=b.bid and a.device_date=b.device_date 
+  inner join check3 as c
+   on a.serialnumber = c.serialnumber and a.bid=c.bid and a.device_date=c.device_date 
+   where a.battery_shift_start_lvl >90
+ --order by serialnumber,bid,device_date
+ );
+
+create or replace TEMP table `comb_bid_data` as (
+  select *,abs(avg_hourly_battery_discharge_rate)*8 as battery_discharge_eos
+  from comb_bid_data 
+ );
+create or replace TEMP table `battery_data_summ1` as (
+  select a.serialnumber,a.bid,a.device_date,b.shift_first_recorded_hour,b.battery_shift_start_lvl,
+  b.avg_hourly_battery_discharge_rate,b.shift_last_recorded_hour,b.battery_shift_last_lvl,
+  from battery_data_summ1 as a inner join comb_bid_data as b
+  on a.serialnumber = b.serialnumber and a.bid=b.bid and a.device_date=b.device_date 
+ );
+
+create or replace TEMP table `comb_site1` as (
+  select a.*,b.site_name,b.master_id
+  from battery_data_summ1 as a inner join site_data as b
+  on a.serialnumber = b.serial_number and a.device_date=b.slot_date
+ );
+create or replace TEMP table `comb_site1` as (
+  select *,(battery_shift_start_lvl-battery_shift_last_lvl) as total_discharge
+  from comb_site1 
+ );
+ create or replace TEMP table `comb_site1` as (
+  select *,CASE
+       WHEN ((shift_last_recorded_hour between 7 and 14) and abs(avg_hourly_battery_discharge_rate) > 10 )  THEN 1
+    ELSE
+     0
+    END AS battery_did_not_last_shift
+  from comb_site1 
+ );
+
+-- create or replace TEMP table `comb_site_batt_health1` as (
+-- select a.*,b.string_field_5 as health_Status,b.string_field_4 as state
+-- from comb_site1 as a left join 
+-- `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.smart_battery_health_dec2023` as b
+-- on a.bid = b.string_field_3
+-- order by serialnumber,bid,device_date );
+
+create or replace TEMP table `comb_site_batt_health1` as (
+select a.*,b.health_status as health_Status,b.status as state
+from comb_site1 as a left join 
+(select concat(part_num,extract(date from TIMESTAMP_MILLIS(manufacture_date)),battery_sn) as bid, health_status,status from
+`dmsanlytc-cssanlytc-eu-d.Test_data_PFW.smart_battery_health_jun_2024`
+ ) b
+on a.bid = b.bid
+--order by serialnumber,bid,device_date 
+);
+
+create or replace table  `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.site_battery_health_jun_2024` as
+  select * from comb_site_batt_health1
+  order by serialnumber,bid,device_date ;
+
+
+
+create or replace TEMP table `battery_data_summ2` as (SELECT
+site_name,device_date,count(distinct serialnumber) as cnt_devices,count(distinct bid) as cnt_bid,
+avg(battery_shift_start_lvl) as avg_battery_shift_start_lvl_overall,
+avg(abs(avg_hourly_battery_discharge_rate)) as avg_hourly_battery_discharge_rate_overall,
+count( case when battery_did_not_last_shift=1 then 1 end) as cnt_bid_did_not_last_shift,
+count( case when battery_did_not_last_shift=0 then 1 end) as cnt_bid_last_shift
+from comb_site_batt_health1
+where bid != "unknownunknownunknown"
+group by site_name,device_date
+---order by site_name,device_date 
+);
+
+---discharge rate and battery level by site_name device_date
+create or replace TEMP table `battery_shift_state2` as (SELECT
+site_name,device_date,battery_did_not_last_shift,avg(battery_shift_start_lvl) as avg_battery_shift_start_lvl,
+avg(abs(avg_hourly_battery_discharge_rate)) as avg_hourly_battery_discharge_rate
+from comb_site1
+group by site_name,device_date,battery_did_not_last_shift
+---order by site_name ,device_date,battery_did_not_last_shift
+);
+
+create or replace TEMP table `battery_shift_state2_last` as (SELECT
+site_name,device_date,avg_battery_shift_start_lvl as avg_battery_shift_start_lvl_last,
+avg_hourly_battery_discharge_rate as avg_hourly_battery_discharge_rate_last
+from battery_shift_state2
+where battery_did_not_last_shift = 0
+--order by site_name ,device_date
+);
+
+create or replace TEMP table `battery_shift_state2_didnotlast` as (SELECT
+site_name,device_date,avg_battery_shift_start_lvl as avg_battery_shift_start_lvl_didnotlast,
+avg_hourly_battery_discharge_rate as avg_hourly_battery_discharge_rate_didnotlast
+from battery_shift_state2
+where battery_did_not_last_shift = 1
+--order by site_name ,device_date
+);
+
+create or replace TEMP table `battery_shift_state2_final` as (
+  select a.*,b.avg_battery_shift_start_lvl_didnotlast,b.avg_hourly_battery_discharge_rate_didnotlast
+  from battery_shift_state2_last as a inner join battery_shift_state2_didnotlast as b
+  on a.site_name = b.site_name and a.device_date=b.device_date
+ );
+
+ create or replace TEMP table `battery_data_summ2` as (
+  select a.*,b.avg_battery_shift_start_lvl_didnotlast,b.avg_hourly_battery_discharge_rate_didnotlast,
+  b.avg_battery_shift_start_lvl_last,b.avg_hourly_battery_discharge_rate_last,
+  from battery_data_summ2 as a inner join battery_shift_state2_final as b
+  on a.site_name = b.site_name and a.device_date=b.device_date
+ );
+
+-- create or replace TEMP table `battery_data_state1` as (
+
+-- select distinct site_name,bid,device_date,state from comb_site_batt_health1
+-- where bid != "unknownunknownunknown" and site_name = "1-Altens DO"
+-- order by site_name );
+
+----Health state
+create or replace TEMP table `battery_data_state` as (SELECT
+site_name,device_date,count( case when state='ACTIVE' then 1 end) as active_cnt,
+count( case when state='OOC' then 1 end) as ooc_cnt
+from (
+select distinct site_name,bid,device_date,state from comb_site_batt_health1
+where bid != "unknownunknownunknown")
+group by site_name,device_date
+--order by site_name ,device_date
+);
+
+---Replace category
+create or replace TEMP table `battery_repl_now` as (SELECT
+site_name,count(distinct bid) as cnt_bid_repl_now
+from comb_site_batt_health1
+where bid != "unknownunknownunknown" and health_Status = "Replace Now"
+group by site_name
+---order by site_name 
+);
+
+create or replace TEMP table `battery_repl_soon` as (SELECT
+site_name,count(distinct bid) as cnt_bid_repl_soon
+from comb_site_batt_health1
+where bid != "unknownunknownunknown" and health_Status = "Replace Soon"
+group by site_name
+--order by site_name 
+);
+
+-- create or replace TEMP table `battery_data_summ2` as (
+-- select a.*, b.cnt_bid_repl_now ,c.cnt_bid_repl_soon from 
+-- battery_data_summ2 as a
+-- left join 
+-- battery_repl_now as b
+-- using(site_name,device_date)
+-- left join battery_repl_soon as c
+-- using (site_name,device_date)
+--   );
+---This will give count of bid swap
+create or replace TEMP table `data_for_swap` as (
+select site_name,device_date, count(distinct serialnumber)  AS num_swaps_raw from
+(select *,count(distinct bid) OVER (PARTITION BY serialnumber,device_date) AS num_distinct_bid_by_sn from
+comb_site_batt_health1 )
+where num_distinct_bid_by_sn =2
+group by  site_name,device_date
+--order by site_name,device_date 
+);
+
+create or replace TEMP table `battery_data_summ3` as (SELECT
+a.*, b.active_cnt,b.ooc_cnt,c.num_swaps_raw
+from battery_data_summ2 as a left join battery_data_state as b
+using(site_name,device_date)
+left join data_for_swap as c
+using(site_name,device_date)
+--order by site_name,device_date 
+);
+
+create or replace TEMP table `battery_data_summ3` as (SELECT *,COALESCE(num_swaps_raw, 0) as num_swaps
+from battery_data_summ3
+--order by site_name, device_date 
+);
+
+-- create or replace TEMP table `battery_data_summ3` as (
+--   select *,CASE WHEN num_swaps_raw IS NULL
+--          THEN 0
+--          ELSE num_swaps_raw
+--          END
+--          AS num_swaps
+--   from battery_data_summ3 
+--  );
+ 
+create or replace TEMP table `comb_data` as (
+select a.*, b.total_devices ,b.total_bid,c.cnt_bid_repl_now,d.cnt_bid_repl_soon,
+ from 
+battery_data_summ3 as a
+left join 
+tot_dev_batt_summ as b
+using(site_name)
+left join 
+battery_repl_now as c
+using(site_name)
+left join battery_repl_soon as d
+using (site_name)
+  );
+
+create or replace TEMP table `site_name_stat_rest` as (SELECT site_name,
+avg(cnt_devices)  as avg_devices_used ,
+avg(cnt_bid) as avg_bid_used,
+STDDEV(num_swaps)  as std_swaps ,
+avg(num_swaps)  as avg_swaps 
+from comb_data
+where not (lower(site_name) like '%depot%') and 
+--device_date not in (Select Sunday from `dmsanlytc-cssanlytc-eu-d.Test_data_PFW.weekend_dates`)
+device_date not in ("2024-06-02","2024-06-09","2024-06-17","2024-06-23","2024-06-30")
+group by site_name
+--order by site_name
+);
+
+create or replace TEMP table `site_name_stat_depot` as (SELECT site_name,
+avg(cnt_devices)  as avg_devices_used,
+avg(cnt_bid) as avg_bid_used,
+STDDEV(num_swaps)  as std_swaps ,
+avg(num_swaps)  as avg_swaps 
+from comb_data
+where  (lower(site_name) like '%depot%') and 
+--device_date not in (Select Saturday, Sunday from `dmsanlytc-cssanlytc-eu-d.Test_data_PFW.weekend_dates`)
+device_date not in ("2024-06-01","2024-06-02","2024-06-08","2024-06-09","2024-06-15","2024-06-16","2024-06-22","2024-06-23","2024-06-29","2024-06-30")
+group by site_name
+--order by site_name
+);
+
+create or replace TEMP table `site_name_stat` as (
+SELECT * from site_name_stat_rest
+union all 
+select * from site_name_stat_depot);
+
+
+-- create or replace TEMP table `comb_data1` as (SELECT
+-- *,(COALESCE(cnt_bid_repl_now, 0) + COALESCE(cnt_bid_repl_soon, 0)) as replace_cat,avg(cnt_devices) over (partition by site_name)  as avg_devices_used ,
+-- STDDEV(num_swaps) over (partition by site_name)  as std_swaps ,
+-- avg(num_swaps) over (partition by site_name)  as avg_swaps ,
+-- round((total_bid-total_devices),0)  as total_spare_bid 
+-- from comb_data
+-- order by site_name,device_date );
+
+create or replace TEMP table `comb_data1` as (SELECT
+*,(COALESCE(cnt_bid_repl_now, 0) + COALESCE(cnt_bid_repl_soon, 0)) as replace_cat,
+round((total_bid-total_devices),0)  as total_spare_bid 
+from comb_data
+--order by site_name,device_date 
+);
+
+
+create or replace TEMP table `comb_data1` as (
+select a.*, b.avg_devices_used,b.avg_bid_used,b.std_swaps,b.avg_swaps from 
+comb_data1 as a
+left join 
+site_name_stat as b
+using(site_name)
+);
+
+create or replace table `dmsanlytc-cssanlytc-eu-d.TEST_DATA_EU_SS.site_battery_analysis_jun2024` as (
+  Select *,
+     CASE
+      WHEN ((COALESCE(mean_2std, 0) + COALESCE(replace_cat, 0))  > est_spare_bid )  THEN 1
+    ELSE
+     0
+    END AS site_need_battery
+   from(
+SELECT
+*,round((avg_swaps +2*std_swaps),0) as mean_2std,
+(round(total_bid-avg_bid_used,0) + total_spare_bid ) as est_spare_bid
+from `comb_data1`
+order by site_name,device_date )order by site_name,device_date );
+
+
+
